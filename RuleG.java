@@ -112,17 +112,19 @@ public class RuleG implements Comparable<RuleG>{
 	public double getConfidence() {
 		return ((double)count) / tids1.cardinality();
 	}
-
-	public boolean isRedundant(RuleG o) {
+	
+	public boolean isRedundantConsequent(RuleG o) {
 		//compare antecedent
-		if (!linearIn(o.itemset1, this.itemset1)) {
+		if (!linearIn(o.itemset2, this.itemset2)) {
 			return false;
 		}
 		
+		/*
 		// compare the supports
 		if(this.getAbsoluteSupport() <= o.getAbsoluteSupport()){
 			return true;
 		}
+		*/
 		
 		// compare confidence		
 		if(this.getConfidence() <= o.getConfidence()){
@@ -131,8 +133,46 @@ public class RuleG implements Comparable<RuleG>{
 		
 		return false;
 	}
+
+	public boolean isRedundantAntecedent(RuleG o) {
+		//compare antecedent
+		if (!linearIn(o.itemset1, this.itemset1)) {
+			return false;
+		}
+		
+		if (o.itemset2[0].intValue() != this.itemset2[0].intValue())
+		{
+			return false;
+		}		
+		
+		// compare the supports
+		if(o.getAbsoluteSupport() >= this.getAbsoluteSupport() && o.getConfidence() >= this.getConfidence()){
+			return true;
+		}
+		
+		return false;
+	}
 	
 	public static boolean linearIn(Integer[] outer, Integer[] inner) {
+		/*boolean contain = false;		
+			
+		for(int i=0; i< inner.length; i++){
+			contain = false;	
+			
+			for(int j=0; j< outer.length; j++){			
+				if (outer[j] == inner[i])
+				{
+					contain = true;
+					break;
+				}					
+			}
+			
+			if (!contain)
+				return false;
+		}
+		
+		return true;
+		*/
 	   return java.util.Arrays.asList(outer).containsAll(java.util.Arrays.asList(inner));
 	}
 	

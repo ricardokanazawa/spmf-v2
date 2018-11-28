@@ -29,23 +29,23 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.PriorityQueue;
 
-import ca.pfv.spmf.algorithms.ArraysAlgos;
 import ca.pfv.spmf.tools.MemoryLogger;
 
 /**
  * TopKRules is an algorithm for mining the TOP-K  association rules from a 
  * transaction database using
- * a pattern growth approach and several optimizations. This is the original
- * implementation as proposed in the following paper:
+ * a pattern growth approach and several optimizations. This is a modification of the original
+ * implementation called TopKClassRules that is designed for mining rules with fixed items
+ * as consequent (what is called class association rules). The TopKRule algorithm was 
+ * proposed in this paper:
  * <br/><br/>
  * 
  * Fournier-Viger, P., Wu, C.-W., Tseng, V. S. (2012). Mining Top-K Association Rules. Proceedings of the 25th Canadian Conf. on Artificial Intelligence (AI 2012), Springer, LNAI 7310, pp. 61-73.
  * 
  * @author Philippe Fournier-Viger, 2012
- * @see AlgoTopKRules
- * @see AlgoTNR
+ * @see AlgoTopKClassRules
  */
-public class AlgoTopKRules {
+public class AlgoTopKClassRules {
 	
 	/** start time of latest execution */
 	long timeStart = 0;  
@@ -74,10 +74,10 @@ public class AlgoTopKRules {
 	int[] tableItemCount; 
 	
 	/**  the top k rules found until now */
-	PriorityQueue<RuleG> kRules; 
+	PriorityQueue<ClassRuleG> kRules; 
 	
 	/** the candidates for expansion */
-	PriorityQueue<RuleG> candidates; 
+	PriorityQueue<ClassRuleG> candidates; 
 
 	/** the maximum number of candidates at the same time during the last execution */
 	int maxCandidateCount = 0;
@@ -85,20 +85,12 @@ public class AlgoTopKRules {
 	/**  the maximum size of the antecedent of rules (optional) */
 	int maxAntecedentSize = Integer.MAX_VALUE;
 	
-	/** the maximum size of the consequent of rules (optional) */
-	int maxConsequentSize = Integer.MAX_VALUE;
-	
-	/**
-	 * If true, the transaction identifiers will be output for each pattern in the
-	 * output file
-	 */
-	private boolean outputTransactionIdentifiers = false;
-
-
+	/** the list of items that can be used as consequent for all rules */
+	 int[] itemToBeUsedAsConsequent;
 	/**
 	 * Default constructor
 	 */
-	public AlgoTopKRules() {
+	public AlgoTopKClassRules() {
 	}
 
 	/**
@@ -106,8 +98,9 @@ public class AlgoTopKRules {
 	 * @param k the value of k.
 	 * @param minConfidence the minimum confidence threshold.
 	 * @param database the database.
+	 * @param fixedItemAsConsequent an item that must be the consequent of all rules
 	 */
-	public void runAlgorithm(int k, double minConfidence, Database database) {
+	public void runAlgorithm(int k, double minConfidence, Database database,  int[] itemToBeUsedAsConsequent) {
 		// reset statistics
 		MemoryLogger.getInstance().reset(); // reset utility to check memory usage
 		maxCandidateCount = 0;
@@ -116,26 +109,27 @@ public class AlgoTopKRules {
 		this.minConfidence = minConfidence;
 		this.database = database;
 		this.k = k;
+		this.itemToBeUsedAsConsequent = itemToBeUsedAsConsequent;
 
 		// prepare internal variables and structures
 		this.minsuppRelative = 1;
 		tableItemTids = new BitSet[database.maxItem + 1]; // id item, count
 		tableItemCount = new int[database.maxItem + 1];
-		kRules = new PriorityQueue<RuleG>();
-		candidates = new PriorityQueue<RuleG>(new Comparator<RuleG>(){
+		kRules = new PriorityQueue<ClassRuleG>();
+		candidates = new PriorityQueue<ClassRuleG>(new Comparator<ClassRuleG>(){
 			// BUG FIX 2017
 			@Override
-			public int compare(RuleG o1, RuleG o2) {
+			public int compare(ClassRuleG o1, ClassRuleG o2) {
 				return - (o1.compareTo(o2));
 			}});
 
 		// record the start time
 		timeStart = System.currentTimeMillis(); 
 		
-		if(maxAntecedentSize >=1 && maxConsequentSize >=1){
+		if(maxAntecedentSize >=1){
 			// perform the first database scan to generate vertical database representation
 			scanDatabase(database);
-			
+			 
 			// start the generation of rules
 			start();
 		}
@@ -163,7 +157,10 @@ public class AlgoTopKRules {
 			BitSet tidsI = tableItemTids[itemI];
 
 			// for each item J in the database
-			main2: for (int itemJ = itemI + 1; itemJ <= database.maxItem; itemJ++) {
+			main2: for (int itemJ : itemToBeUsedAsConsequent) {
+				if(itemI == itemJ){
+					continue;
+				}
 				// if the item is not frequent according to the current
 				// minsup threshold, then skip it
 				if (tableItemCount[itemJ] < minsuppRelative) {
@@ -197,23 +194,14 @@ public class AlgoTopKRules {
 		// "candidates" to find more rules.
 		while (candidates.size() > 0) {
 			// We take the rule that has the highest support first
-			RuleG rule = candidates.poll();
+			ClassRuleG rule = candidates.poll();
 			// if there is no more candidates with enough support, then we stop
 			if (rule.getAbsoluteSupport() < minsuppRelative) {
 				// candidates.remove(rule);
 				break;
 			}
 			// Otherwise, we try to expand the rule
-			if (rule.expandLR) {
-				// we do it
-				expandLR(rule);
-			} else {
-				// If the rule should only be expanded by left side to
-				// avoid generating redundant rules, then we 
-				// only expand the left side.
-				expandR(rule);
-			}
-			// candidates.remove(rule);
+			expandL(rule);
 		}
 	}
 
@@ -227,15 +215,13 @@ public class AlgoTopKRules {
 	 * @param commonTids  the set of IDs of transaction containing I and J (BitSet)
 	 * @param cardinality  the cardinality of "commonTids"
 	 */
-	private void generateRuleSize11(Integer item1, BitSet tid1, Integer item2,
+	private void generateRuleSize11(Integer item1, BitSet tid1, int item2,
 			BitSet tid2, BitSet commonTids, int cardinality) {
 		// Create the rule I ==> J
 		Integer[] itemset1 = new Integer[1];
 		itemset1[0] = item1;
-		Integer[] itemset2 = new Integer[1];
-		itemset2[0] = item2;
-		RuleG ruleLR = new RuleG(itemset1, itemset2, cardinality, tid1,
-				commonTids, item1, item2);
+		ClassRuleG ruleLR = new ClassRuleG(itemset1, item2, cardinality, tid1,
+				commonTids, item1); 
 		
 		// calculate the confidence
 		double confidenceIJ = ((double) cardinality) / (tableItemCount[item1]);
@@ -246,28 +232,9 @@ public class AlgoTopKRules {
 			save(ruleLR, cardinality);
 		}
 		// register the rule as a candidate for future expansion
-		if(ruleLR.getItemset1().length < maxAntecedentSize ||
-				ruleLR.getItemset2().length < maxConsequentSize	){
-			registerAsCandidate(true, ruleLR);
+		if(ruleLR.getItemset1().length < maxAntecedentSize ){
+			registerAsCandidate(ruleLR);
 		}
-
-		// calculate the confidence
-		double confidenceJI = ((double) cardinality) / (tableItemCount[item2]);
-		
-		// Create the rule J ==> I
-		RuleG ruleRL = new RuleG(itemset2, itemset1, cardinality, tid2,
-				commonTids, item2, item1);
-		// if rule J->I has minimum confidence
-		if (confidenceJI >= minConfidence) {
-			// save the rule in current top-k rules
-			save(ruleRL, cardinality);
-		}
-		// register the rule as a candidate for future expansion
-		if(ruleRL.getItemset1().length < maxAntecedentSize ||
-				ruleRL.getItemset2().length < maxConsequentSize	){
-			registerAsCandidate(true, ruleRL);
-		}
-
 	}
 
 	/**
@@ -276,9 +243,8 @@ public class AlgoTopKRules {
 	 * expansions otherwise only right.
 	 * @param rule the given rule
 	 */
-	private void registerAsCandidate(boolean expandLR, RuleG rule) {
+	private void registerAsCandidate(ClassRuleG rule) {
 		// add the rule to candidates
-		rule.expandLR = expandLR;
 		candidates.add(rule);
 
 		// record the maximum number of candidates for statistics
@@ -291,10 +257,10 @@ public class AlgoTopKRules {
 
 	/**
 	 * Try to expand a rule by left and right expansions.
-	 * @param ruleG the rule
+	 * @param ClassRuleG the rule
 	 */
-	private void expandLR(RuleG ruleG) {
-    	if(ruleG.getItemset2().length == maxConsequentSize && ruleG.getItemset1().length == maxAntecedentSize){
+	private void expandL(ClassRuleG ClassRuleG) {
+    	if(ClassRuleG.getItemset1().length == maxAntecedentSize){
     		return;
     	}
     	
@@ -302,10 +268,9 @@ public class AlgoTopKRules {
 		// Key: item   Value: bitset indicating the IDs of the transaction containing the item
 		// from the transactions containing the rule.
 		Map<Integer, BitSet> mapCountLeft = new HashMap<Integer, BitSet>();
-		Map<Integer, BitSet> mapCountRight = new HashMap<Integer, BitSet>();
 
 		
-		for (int tid = ruleG.common.nextSetBit(0); tid >= 0; tid = ruleG.common
+		for (int tid = ClassRuleG.common.nextSetBit(0); tid >= 0; tid = ClassRuleG.common
 				.nextSetBit(tid + 1)) {
 			Iterator<Integer> iter = database.getTransactions().get(tid)
 					.getItems().iterator();
@@ -313,16 +278,14 @@ public class AlgoTopKRules {
 				Integer item = iter.next();
 				// CAN DO THIS BECAUSE TRANSACTIONS ARE SORTED BY DESCENDING
 				// ITEM IDS (see Database.Java)
-				if (item < ruleG.maxLeft && item < ruleG.maxRight) { //
+				if (item < ClassRuleG.maxLeft && item < ClassRuleG.getItemset2()) { //
 					break;
 				}
 				if (tableItemCount[item] < minsuppRelative) {
 					iter.remove();
 					continue;
 				}
-				if (item > ruleG.maxLeft
-						&& !ArraysAlgos.containsLEX(ruleG.getItemset2(), item,
-								ruleG.maxRight)) {
+				if (item > ClassRuleG.maxLeft &&  item != ClassRuleG.getItemset2()) {
 					BitSet tidsItem = mapCountLeft.get(item);
 					if (tidsItem == null) {
 						tidsItem = new BitSet();
@@ -330,66 +293,12 @@ public class AlgoTopKRules {
 					}
 					tidsItem.set(tid);
 				}
-				if (item > ruleG.maxRight
-						&& !ArraysAlgos.containsLEX(ruleG.getItemset1(), item,
-								ruleG.maxLeft)) {
-					BitSet tidsItem = mapCountRight.get(item);
-					if (tidsItem == null) {
-						tidsItem = new BitSet();
-						mapCountRight.put(item, tidsItem);
-					}
-					tidsItem.set(tid);
-				}
-			}
-		}
-
-		// for each item c found in the previous step, we create a rule	
-		// I  ==> J U {c} if the support is enough 	
-		if(ruleG.getItemset2().length < maxConsequentSize){
-			for (Entry<Integer, BitSet> entry : mapCountRight.entrySet()) {
-				BitSet tidsRule = entry.getValue();
-				int ruleSupport = tidsRule.cardinality();
-	
-				// if the support is enough
-				if (ruleSupport >= minsuppRelative) {
-					Integer itemC = entry.getKey();
-	
-					// create new right part of rule
-					Integer[] newRightItemset = new Integer[ruleG.getItemset2().length + 1];
-					System.arraycopy(ruleG.getItemset2(), 0, newRightItemset, 0,
-							ruleG.getItemset2().length);
-					newRightItemset[ruleG.getItemset2().length] = itemC;
-	
-					// recompute maxRight
-					int maxRight = (itemC >= ruleG.maxRight) ? itemC
-							: ruleG.maxRight;
-	
-					// calculate the confidence of the rule
-					double confidence = ((double) ruleSupport)
-							/ ruleG.tids1.cardinality();
-					
-					// create the rule
-					RuleG candidate = new RuleG(ruleG.getItemset1(),
-							newRightItemset, ruleSupport, ruleG.tids1, tidsRule,
-							ruleG.maxLeft, maxRight);
-					
-					// if the confidence is enough
-					boolean saveOK = false; 
-					if (confidence >= minConfidence) {
-						// save the rule in current top-k rules
-						saveOK = save(candidate, ruleSupport);
-					}
-					// register the rule as a candidate for future expansion
-					if(saveOK && candidate.getItemset2().length < maxConsequentSize){
-						registerAsCandidate(false, candidate);
-					}
-				}
 			}
 		}
 
 		// for each item c found in the previous step, we create a rule	
 		// I  U {c} ==> J if the support is enough
-		if(ruleG.getItemset1().length < maxAntecedentSize){
+		if(ClassRuleG.getItemset1().length < maxAntecedentSize){
 			for (Entry<Integer, BitSet> entry : mapCountLeft.entrySet()) {
 				BitSet tidsRule = entry.getValue();
 				int ruleSupport = tidsRule.cardinality();
@@ -399,176 +308,69 @@ public class AlgoTopKRules {
 					Integer itemC = entry.getKey();
 	
 					// The tidset of the left itemset is calculated
-					BitSet tidsLeft = (BitSet) ruleG.tids1.clone();
+					BitSet tidsLeft = (BitSet) ClassRuleG.tids1.clone();
 					tidsLeft.and(tableItemTids[itemC]);
 	
 					// create new left part of rule
-					Integer[] newLeftItemset = new Integer[ruleG.getItemset1().length + 1];
-					System.arraycopy(ruleG.getItemset1(), 0, newLeftItemset, 0,
-							ruleG.getItemset1().length);
-					newLeftItemset[ruleG.getItemset1().length] = itemC;
+					Integer[] newLeftItemset = new Integer[ClassRuleG.getItemset1().length + 1];
+					System.arraycopy(ClassRuleG.getItemset1(), 0, newLeftItemset, 0,
+							ClassRuleG.getItemset1().length);
+					newLeftItemset[ClassRuleG.getItemset1().length] = itemC;
 	
 					// recompute maxLeft
-					int maxLeft = itemC >= ruleG.maxLeft ? itemC : ruleG.maxLeft;
+					int maxLeft = itemC >= ClassRuleG.maxLeft ? itemC : ClassRuleG.maxLeft;
 	
 					// calculate the confidence of the rule
 					double confidence = ((double) ruleSupport)
 							/ tidsLeft.cardinality();
 					
 					// create the rule
-					RuleG candidate = new RuleG(newLeftItemset,
-							ruleG.getItemset2(), ruleSupport, tidsLeft, tidsRule,
-							maxLeft, ruleG.maxRight);
+					ClassRuleG candidate = new ClassRuleG(newLeftItemset,
+							ClassRuleG.getItemset2(), ruleSupport, tidsLeft, tidsRule,
+							maxLeft);
 	
+					boolean saveOK = false;
 					// if the confidence is high enough
-					boolean saveOK = false; 
 					if (confidence >= minConfidence) {
 						// save the rule to the top-k rules
-						saveOK = save(candidate, ruleSupport);
+						save(candidate, ruleSupport);
 					}
-					// register the rule as a candidate for further expansions
-					if(saveOK && (candidate.getItemset1().length < maxAntecedentSize ||
-							candidate.getItemset2().length < maxConsequentSize)){
-						registerAsCandidate(true, candidate);
-					}
+					
+					if (true)
+					{
+						// register the rule as a candidate for further expansions
+						registerAsCandidate(candidate);
+					}					
 				}
 			}
 		}
 	}
 	
-	/**
-	 * Try to expand a rule by right expansion only.
-	 * @param ruleG the rule
-	 */
-	private void expandR(RuleG ruleG) {
-    	if(ruleG.getItemset2().length == maxConsequentSize){
-    		return;
-    	}
-    	
-		// map to record the potential item to expand the right side of the rule
-		// Key: item   Value: bitset indicating the IDs of the transaction containing the item
-		// from the transactions containing the rule.
-		Map<Integer, BitSet> mapCountRight = new HashMap<Integer, BitSet>();
-		
-		// for each transaction containing the rule
-		for (int tid = ruleG.common.nextSetBit(0); tid >= 0; tid = ruleG.common
-				.nextSetBit(tid + 1)) {
-			
-			// iterate over the items in this transaction
-			Iterator<Integer> iter = database.getTransactions().get(tid)
-					.getItems().iterator();
-			while (iter.hasNext()) {
-				Integer item = iter.next();
-				
-				// if  that item is not frequent, then remove it from the transaction
-				if (tableItemCount[item] < minsuppRelative) {
-					iter.remove();
-					continue;
-				}
-				
-				//If the item is smaller than the largest item in the right side
-				// of the rule, we can stop this loop because items
-				// are sorted in lexicographical order.
-				if (item < ruleG.maxRight) {
-					break;
-				}
-				
-				// if the item is larger than the maximum item in the right side
-				// and is not contained in the left side of the rule
-				if (item > ruleG.maxRight
-						&& !ArraysAlgos.containsLEX(ruleG.getItemset1(), item,
-								ruleG.maxLeft)) {
-					
-					// update the tidset of the item
-					BitSet tidsItem = mapCountRight.get(item);
-					if (tidsItem == null) {
-						tidsItem = new BitSet();
-						mapCountRight.put(item, tidsItem);
-					}
-					tidsItem.set(tid);
-				}
-			}
-		}
-
-		// for each item c found in the previous step, we create a rule	
-		// I ==> J U {c} if the support is enough
-    	for (Entry<Integer, BitSet> entry : mapCountRight.entrySet()) {
-			BitSet tidsRule = entry.getValue();
-			int ruleSupport = tidsRule.cardinality();
-			
-			// if the support is enough
-			if (ruleSupport >= minsuppRelative) {
-				Integer itemC = entry.getKey();
-
-				// create new right part of rule
-				Integer[] newRightItemset = new Integer[ruleG.getItemset2().length + 1];
-				System.arraycopy(ruleG.getItemset2(), 0, newRightItemset, 0,
-						ruleG.getItemset2().length);
-				newRightItemset[ruleG.getItemset2().length] = itemC;
-
-				//recompute maxRight
-				int maxRight = itemC >= ruleG.maxRight ? itemC : ruleG.maxRight;
-
-				// calculate confidence
-				double confidence = ((double) ruleSupport)
-						/ ruleG.tids1.cardinality();
-				
-				// create the rule
-				RuleG candidate = new RuleG(ruleG.getItemset1(),
-						newRightItemset, ruleSupport, ruleG.tids1, tidsRule,
-						ruleG.maxLeft, maxRight);
-				
-				// if the confidence is enough
-				if (confidence >= minConfidence) {
-					// save the rule to the current top-k rules
-					save(candidate, ruleSupport);
-				}
-				// register the rule as a candidate for future expansion(s)
-				if(candidate.getItemset2().length < maxConsequentSize	){
-					registerAsCandidate(false, candidate); 
-				}
-			}
-		}
-	}
+	
 	
 	/**
 	 * Save a rule to the current set of top-k rules.
 	 * @param rule the rule to be saved
 	 * @param support the support of the rule
 	 */
-	private boolean save(RuleG rule, int support) {
-		boolean validAntecedent = true;
-		boolean redundant = false;			
-			
+	private boolean save(ClassRuleG rule, int support) {		
+		/*boolean redundant = false;
 		
 		Object[] rules = kRules.toArray();		
 		
-		if (!database.isProcedure(rule.getItemset2()[0]))
-			return false;			
-		
-		for(int codigo : rule.getItemset1()) {
-			if (database.isProcedure(codigo)) {
-				validAntecedent = false;
-				break;
-			}				
-		}
-		
-		if (!validAntecedent)
-			return false;
-		
 		for(Object ruleObj : rules){
-			RuleG rule2 = (RuleG) ruleObj;		
-			if (rule2.isRedundantAntecedent(rule)) {
+			ClassRuleG rule2 = (ClassRuleG) ruleObj;		
+			if (rule2.isRedundant(rule)) {
 				kRules.remove(rule2);
 			}						
 				
-			if (rule.isRedundantAntecedent(rule2)) {	
+			if (rule.isRedundant(rule2)) {	
 				 redundant = redundant || true;
-			 }			 	 
+			}			 	 
 		}		
 		
 		if (redundant)
-			return false;
+			return false;*/
 		
 		// We add the rule to the set of top-k rules
 		kRules.add(rule);
@@ -576,7 +378,7 @@ public class AlgoTopKRules {
 		if (kRules.size() > k) {
 			// if the support of the rule that we haved added is higher than
 			// the minimum support, we will need to take out at least one rule
-			if (support > this.minsuppRelative) {
+			if (support >= this.minsuppRelative) {
 				// we recursively remove the rule having the lowest support,
 				// until only k rules are left
 				do {
@@ -617,13 +419,12 @@ public class AlgoTopKRules {
 	 * Print statistics about the last algorithm execution.
 	 */
 	public void printStats() {
-		System.out.println("=============  TOP-K RULES SPMF v.2.10 - STATS =============");
+		System.out.println("=============  TOP-K CLASS RULES SPMF v.2.28 - STATS =============");
 		System.out.println("Minsup : " + minsuppRelative);
 		System.out.println("Rules count: " + kRules.size());
 		System.out.println("Memory : " + MemoryLogger.getInstance().getMaxMemory() + " mb");
 		System.out.println("Total time : " + (timeEnd - timeStart) + " ms");
-		System.out
-				.println("===================================================");
+		System.out.println("===================================================");
 	}
 	
 	/**
@@ -645,7 +446,7 @@ public class AlgoTopKRules {
 			
 			// for each rule
 			for(Object ruleObj : rules){
-				RuleG rule = (RuleG) ruleObj;
+				ClassRuleG rule = (ClassRuleG) ruleObj;
 				
 				// Write the rule
 				StringBuilder buffer = new StringBuilder();
@@ -656,17 +457,8 @@ public class AlgoTopKRules {
 				buffer.append(rule.getAbsoluteSupport());
 				// write separator
 				buffer.append(" #CONF: ");
+				// write confidence
 				buffer.append(rule.getConfidence());
-				// write transaction identifiers
-				if(outputTransactionIdentifiers){
-					// write separator
-					buffer.append(" #TID:");
-					// write all the transaction identifiers of this rule
-					for (int i = rule.common.nextSetBit(0); i != -1; i = rule.common.nextSetBit(i + 1)) {
-					    buffer.append(" ");
-					    buffer.append(i);
-					}
-				}
 				writer.write(buffer.toString());
 				writer.newLine();
 			}
@@ -684,20 +476,4 @@ public class AlgoTopKRules {
 	}
 
 
-	/**
-	 * Set the number of items that a rule consequent should contain (optional).
-	 * @param maxConsequentSize the maximum number of items
-	 */
-	public void setMaxConsequentSize(int maxConsequentSize) {
-		this.maxConsequentSize = maxConsequentSize;
-	}
-
-	/** 
-	 * Set whether the transaction identifiers should be shown 
-	 * in the output file or not
-	 * @param a boolean value (true = show,  false = not show)
-	 */
-	public void setOutputTransactionIdentifiers(boolean outputTransactionIdentifiers) {
-		this.outputTransactionIdentifiers = outputTransactionIdentifiers;
-	}
 }

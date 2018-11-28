@@ -112,12 +112,12 @@ public class ClassRuleG implements Comparable<ClassRuleG>{
 		}
 		
 		// compare the supports
-		if(this.getAbsoluteSupport() <= rule.getAbsoluteSupport()){
+		/*if(this.getAbsoluteSupport() == rule.getAbsoluteSupport()){
 			return true;
-		}
+		}*/
 		
 		// compare confidence		
-		if(this.getConfidence() <= rule.getConfidence()){
+		if(this.getConfidence() < rule.getConfidence()){
 			return true;
 		}
 		
